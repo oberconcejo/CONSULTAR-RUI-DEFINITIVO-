@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { Resolver } from 'dns/promises';
 
-export const maxDuration = 60; // Maximize serverless function execution time (up to 60s on Pro, 10s on Hobby)
+export const runtime = 'edge'; // Forzar ejecución en el Edge Network (ej. BOG1 - Bogotá) para evadir el Geo-bloqueo de Vercel/AWS us-east-1
 export const dynamic = 'force-dynamic'; // Prevent any caching of this route
+
 
 const schema = z.object({
   tipoDocumento: z.string().min(1, 'Selecciona el tipo de documento'),
@@ -132,25 +132,16 @@ export async function POST(req: Request) {
     let status = 0;
     let responseText = '';
 
-    // Bypass SSL issues comunes en sitios gubernamentales
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-    
-    // Configurar Resolución DNS manual hacia Google (8.8.8.8, 8.8.4.4)
-    let customEndpoint = endpoint;
     const urlObj = new URL(endpoint);
-
+    // Consultar Google DNS mediante su API DoH (DNS over HTTPS) para verificación
     try {
-      const resolver = new Resolver();
-      resolver.setServers(['8.8.8.8', '8.8.4.4']);
-      const addresses = await resolver.resolve4(urlObj.hostname);
-      if (addresses && addresses.length > 0) {
-        const targetIp = addresses[0];
-        console.log(`[RUI_DNS] Resolviendo ${urlObj.hostname} a IP: ${targetIp} usando Google DNS`);
-        
-        customEndpoint = endpoint.replace(urlObj.hostname, targetIp);
+      const dohResponse = await fetch(`https://dns.google/resolve?name=${urlObj.hostname}&type=A`);
+      const dohData = await dohResponse.json();
+      if (dohData.Answer && dohData.Answer.length > 0) {
+        console.log(`[RUI_DNS] Google DNS confirma IP: ${dohData.Answer[0].data} para ${urlObj.hostname}`);
       }
     } catch (dnsError) {
-      console.warn('[RUI_DNS_WARN] Falló la resolución con Google DNS. Se usará el DNS por defecto.', dnsError);
+      console.warn('[RUI_DNS_WARN] Falló la verificación DoH con Google DNS.', dnsError);
     }
     
     try {
@@ -162,7 +153,7 @@ export async function POST(req: Request) {
       params.append('pNumDoc', numeroDocumento);
       params.append('pTipDoc', tipoDocumento);
 
-      const response = await fetch(customEndpoint, {
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'host': urlObj.hostname,
