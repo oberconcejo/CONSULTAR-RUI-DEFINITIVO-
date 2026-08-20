@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
+import { Resolver } from 'dns/promises';
 
 export const maxDuration = 60; // Maximize serverless function execution time (up to 60s on Pro, 10s on Hobby)
 export const dynamic = 'force-dynamic'; // Prevent any caching of this route
@@ -184,11 +185,33 @@ export async function POST(req: Request) {
 
     // Bypass SSL issues comunes en sitios gubernamentales
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    
+    // Configurar Resolución DNS manual hacia Google (8.8.8.8, 8.8.4.4)
+    let customBaseUrl = baseUrl;
+    let customEndpoint = endpoint;
+    const urlObj = new URL(baseUrl);
+    const hostHeader = urlObj.hostname;
+
+    try {
+      const resolver = new Resolver();
+      resolver.setServers(['8.8.8.8', '8.8.4.4']);
+      const addresses = await resolver.resolve4(urlObj.hostname);
+      if (addresses && addresses.length > 0) {
+        const targetIp = addresses[0];
+        console.log(`[RUI_DNS] Resolviendo ${urlObj.hostname} a IP: ${targetIp} usando Google DNS`);
+        
+        customBaseUrl = baseUrl.replace(urlObj.hostname, targetIp);
+        customEndpoint = endpoint.replace(urlObj.hostname, targetIp);
+      }
+    } catch (dnsError) {
+      console.warn('[RUI_DNS_WARN] Falló la resolución con Google DNS. Se usará el DNS por defecto.', dnsError);
+    }
 
     const commonHeaders = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
       'Accept-Language': 'es-CO,es-419;q=0.9,es;q=0.8,en;q=0.7',
-      'Connection': 'keep-alive'
+      'Connection': 'keep-alive',
+      'Host': hostHeader
     };
 
     try {
@@ -197,7 +220,7 @@ export async function POST(req: Request) {
       const sessionTimeoutId = setTimeout(() => sessionController.abort(), 3500); // 3.5s max for GET
 
       try {
-        const sessionResponse = await fetch(baseUrl, {
+        const sessionResponse = await fetch(customBaseUrl, {
           method: 'GET',
           headers: {
             ...commonHeaders,
@@ -236,7 +259,7 @@ export async function POST(req: Request) {
         params.append('__RequestVerificationToken', csrfToken);
       }
 
-      const response = await fetch(endpoint, {
+      const response = await fetch(customEndpoint, {
         method: 'POST',
         headers: {
           ...commonHeaders,
