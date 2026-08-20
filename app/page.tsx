@@ -143,7 +143,7 @@ export default function Page() {
                 className="max-w-lg mx-auto space-y-6"
               >
                 
-                {process.env.NODE_ENV !== 'production' && (
+                {(process.env.NODE_ENV !== 'production' || errorDetails) && (
                   <SystemDiagnostic health={health} data={data} status={status} errorDetails={errorDetails} />
                 )}
 
