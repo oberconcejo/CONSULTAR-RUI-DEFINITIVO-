@@ -27,6 +27,7 @@ export default function Page() {
   const [numeroDocumento, setNumeroDocumento] = useState('');
   const [status, setStatus] = useState<'initial' | 'loading' | 'success' | 'error' | 'not_found'>('initial');
   const [message, setMessage] = useState('');
+  const [errorDetails, setErrorDetails] = useState('');
   const [data, setData] = useState<NormalizedResponse | null>(null);
   const [health, setHealth] = useState<any>(null);
   
@@ -56,6 +57,7 @@ export default function Page() {
 
     setStatus('loading');
     setMessage('');
+    setErrorDetails('');
     setData(null);
     setShowDoc(false);
 
@@ -77,10 +79,14 @@ export default function Page() {
         // Handle the structured error object or fallback to a default message
         const errMsg = json.error?.message || json.message || 'No fue posible realizar la consulta. Intenta nuevamente.';
         setMessage(errMsg);
+        if (json.error?.details) {
+          setErrorDetails(json.error.details);
+        }
       }
     } catch (err: any) {
       setStatus('error');
       setMessage('Error de conexión. Intenta nuevamente.');
+      setErrorDetails(err.message || 'Fallo al contactar la API interna');
     }
   };
 
@@ -138,7 +144,7 @@ export default function Page() {
               >
                 
                 {process.env.NODE_ENV !== 'production' && (
-                  <SystemDiagnostic health={health} data={data} status={status} />
+                  <SystemDiagnostic health={health} data={data} status={status} errorDetails={errorDetails} />
                 )}
 
                 <div className="text-center mb-8">
@@ -395,7 +401,7 @@ function RuiResult({
   );
 }
 
-function SystemDiagnostic({ health, data, status }: { health: any, data: any, status: string }) {
+function SystemDiagnostic({ health, data, status, errorDetails }: { health: any, data: any, status: string, errorDetails?: string }) {
   return (
     <div className="bg-slate-900 rounded-xl p-4 text-emerald-400 font-mono text-xs sm:text-sm shadow-sm overflow-hidden border border-slate-800">
       <div className="flex items-center gap-2 mb-3 text-emerald-300 font-semibold border-b border-emerald-800/50 pb-2">
@@ -423,6 +429,14 @@ function SystemDiagnostic({ health, data, status }: { health: any, data: any, st
             {status === 'initial' || status === 'loading' ? 'Esperando...' : (status === 'error' ? 'ERROR' : 'OK')}
           </span>
         </div>
+        
+        {errorDetails && (
+          <div className="col-span-1 sm:col-span-2 mt-2 p-2 bg-red-950/30 border border-red-900/50 rounded-lg text-red-300 text-[11px] font-mono break-all">
+            <span className="font-semibold block mb-1">Causa Técnica (Backend):</span>
+            {errorDetails}
+          </div>
+        )}
+
         {data && data.diagnostic && (
           <div className="flex justify-between border-t border-slate-800/50 mt-1 pt-1 col-span-1 sm:col-span-2">
             <span className="text-slate-500">Tiempo de respuesta RUI:</span> 

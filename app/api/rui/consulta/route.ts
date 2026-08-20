@@ -181,24 +181,37 @@ export async function POST(req: Request) {
     let cookieHeader = '';
     let csrfToken = '';
 
+    // Bypass SSL issues comunes en sitios gubernamentales
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
+    const commonHeaders = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Accept-Language': 'es-CO,es-419;q=0.9,es;q=0.8,en;q=0.7'
+    };
+
     try {
-      // 2.a FETCH SESSION & CSRF TOKEN
-      const sessionResponse = await fetch(baseUrl, {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        },
-        signal: controller.signal
-      });
-      
-      const sessionCookies = sessionResponse.headers.getSetCookie ? sessionResponse.headers.getSetCookie() : [];
-      cookieHeader = sessionCookies.map(c => c.split(';')[0]).join('; ');
-      
-      const htmlText = await sessionResponse.text();
-      // Regex para encontrar el token CSRF clásico de ASP.NET
-      const csrfMatch = htmlText.match(/name="__RequestVerificationToken" type="hidden" value="([^"]+)"/i);
-      if (csrfMatch) {
-        csrfToken = csrfMatch[1];
+      try {
+        // 2.a FETCH SESSION & CSRF TOKEN (Aislado en su propio try-catch)
+        const sessionResponse = await fetch(baseUrl, {
+          method: 'GET',
+          headers: {
+            ...commonHeaders,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Upgrade-Insecure-Requests': '1'
+          },
+          signal: controller.signal
+        });
+        
+        const sessionCookies = sessionResponse.headers.getSetCookie ? sessionResponse.headers.getSetCookie() : [];
+        cookieHeader = sessionCookies.map(c => c.split(';')[0]).join('; ');
+        
+        const htmlText = await sessionResponse.text();
+        const csrfMatch = htmlText.match(/name="__RequestVerificationToken" type="hidden" value="([^"]+)"/i);
+        if (csrfMatch) {
+          csrfToken = csrfMatch[1];
+        }
+      } catch (sessionError: any) {
+        console.warn('[RUI_WARN] No se pudo obtener sesión inicial. Continuando con POST directo.', sessionError.message);
       }
 
       // 2.b PERFORM ACTUAL POST QUERY
@@ -212,10 +225,13 @@ export async function POST(req: Request) {
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Cookie': cookieHeader,
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'X-Requested-With': 'XMLHttpRequest'
+          ...commonHeaders,
+          'Accept': 'application/json, text/javascript, */*; q=0.01',
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'X-Requested-With': 'XMLHttpRequest',
+          'Origin': baseUrl,
+          'Referer': `${baseUrl}/`,
+          ...(cookieHeader ? { 'Cookie': cookieHeader } : {})
         },
         body: params.toString(),
         signal: controller.signal
@@ -231,7 +247,7 @@ export async function POST(req: Request) {
         let errCode = 'RUI_CONNECTION_ERROR';
         
         if (status === 403 || status === 401) {
-          errMessage = 'El servicio rechazó temporalmente la solicitud.';
+          errMessage = 'El servicio rechazó temporalmente la solicitud (Posible bloqueo por WAF/Firewall).';
           errCode = 'RUI_FORBIDDEN';
         } else if (status === 429) {
           errMessage = 'Se alcanzó temporalmente el límite de consultas. Espera unos minutos.';
@@ -243,20 +259,25 @@ export async function POST(req: Request) {
 
         return NextResponse.json({ 
           success: false, 
-          error: { code: errCode, message: errMessage, details: `HTTP ${status}` }
-        }, { status });
+          error: { code: errCode, message: errMessage, details: `HTTP ${status} - ${responseText.substring(0, 100)}` }
+        }, { status: status >= 500 ? 502 : status }); // Si es 5xx, devolvemos 502 Bad Gateway
       }
     } catch (fetchError: any) {
       clearTimeout(timeoutId);
-      if (fetchError.name === 'AbortError') {
+      const isTimeout = fetchError.name === 'AbortError';
+      const exactError = fetchError.cause?.message || fetchError.message || 'Unknown network error';
+      
+      console.error('[RUI_NETWORK_ERROR]', exactError);
+
+      if (isTimeout) {
         return NextResponse.json({ 
           success: false, 
-          error: { code: 'RUI_TIMEOUT', message: 'El servicio está tardando demasiado en responder. Intenta nuevamente.', details: 'Timeout' }
+          error: { code: 'RUI_TIMEOUT', message: 'El servicio está tardando demasiado en responder. Intenta nuevamente.', details: exactError }
         }, { status: 504 });
       }
       return NextResponse.json({ 
         success: false, 
-        error: { code: 'RUI_CONNECTION_ERROR', message: 'No fue posible conectar con el servicio RUI', details: fetchError.message || 'Unknown network error' }
+        error: { code: 'RUI_CONNECTION_ERROR', message: 'No fue posible conectar con el servicio RUI', details: exactError }
       }, { status: 502 });
     }
 
