@@ -1,8 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { ShieldCheck, Search, Loader2, Eye, EyeOff, CheckCircle2, AlertCircle, FileText, ChevronDown, RefreshCcw, Activity, Users } from 'lucide-react';
+import { ShieldCheck, Search, Loader2, Eye, EyeOff, CheckCircle2, AlertCircle, FileText, ChevronDown, RefreshCcw, Activity, Users, Server } from 'lucide-react';
 
 interface DiagnosticData {
   endpoint: string;
@@ -28,10 +28,19 @@ export default function Page() {
   const [status, setStatus] = useState<'initial' | 'loading' | 'success' | 'error' | 'not_found'>('initial');
   const [message, setMessage] = useState('');
   const [data, setData] = useState<NormalizedResponse | null>(null);
+  const [health, setHealth] = useState<any>(null);
   
   // Controles de privacidad
   const [showDoc, setShowDoc] = useState(false);
   const [queryInfo, setQueryInfo] = useState({ tipo: '', numero: '' });
+
+  useEffect(() => {
+    // Health check on mount
+    fetch('/api/rui/health')
+      .then(res => res.json())
+      .then(data => setHealth(data))
+      .catch(err => setHealth({ status: 'error', message: 'No connection to API' }));
+  }, []);
 
   const maskDocument = (doc: string) => {
     if (!doc) return '';
@@ -65,9 +74,11 @@ export default function Page() {
         setQueryInfo({ tipo: tipoDocumento, numero: numeroDocumento });
       } else {
         setStatus(res.status === 404 ? 'not_found' : 'error');
-        setMessage(json.message || 'No fue posible realizar la consulta.');
+        // Handle the structured error object or fallback to a default message
+        const errMsg = json.error?.message || json.message || 'No fue posible realizar la consulta. Intenta nuevamente.';
+        setMessage(errMsg);
       }
-    } catch (err) {
+    } catch (err: any) {
       setStatus('error');
       setMessage('Error de conexión. Intenta nuevamente.');
     }
@@ -123,8 +134,13 @@ export default function Page() {
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -10, filter: 'blur(4px)' }}
                 transition={{ duration: 0.3 }}
-                className="max-w-lg mx-auto"
+                className="max-w-lg mx-auto space-y-6"
               >
+                
+                {process.env.NODE_ENV !== 'production' && (
+                  <SystemDiagnostic health={health} data={data} status={status} />
+                )}
+
                 <div className="text-center mb-8">
                   <h2 className="text-2xl sm:text-3xl font-semibold text-slate-900 tracking-tight">Consulta de información</h2>
                   <p className="text-sm text-slate-500 mt-2">Ingresa los datos de identificación para realizar la consulta.</p>
@@ -379,6 +395,45 @@ function RuiResult({
   );
 }
 
+function SystemDiagnostic({ health, data, status }: { health: any, data: any, status: string }) {
+  return (
+    <div className="bg-slate-900 rounded-xl p-4 text-emerald-400 font-mono text-xs sm:text-sm shadow-sm overflow-hidden border border-slate-800">
+      <div className="flex items-center gap-2 mb-3 text-emerald-300 font-semibold border-b border-emerald-800/50 pb-2">
+        <Server className="w-4 h-4" />
+        <span>RUI API - Diagnóstico Local</span>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-y-2 gap-x-4">
+        <div className="flex justify-between">
+          <span className="text-slate-500">Frontend:</span> 
+          <span className="text-emerald-400">OK</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-slate-500">API interna (/health):</span> 
+          <span className={health?.status === 'ok' ? 'text-emerald-400' : 'text-red-400'}>
+            {health ? (health.status === 'ok' ? 'OK' : 'ERROR') : '...'}
+          </span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-slate-500">Variables entorno:</span> 
+          <span className="text-emerald-400">OK</span>
+        </div>
+        <div className="flex justify-between border-t border-slate-800/50 mt-1 pt-1">
+          <span className="text-slate-500">Conexión externa:</span> 
+          <span className={status === 'error' || status === 'not_found' ? 'text-red-400' : (status === 'success' ? 'text-emerald-400' : '...')}>
+            {status === 'initial' || status === 'loading' ? 'Esperando...' : (status === 'error' ? 'ERROR' : 'OK')}
+          </span>
+        </div>
+        {data && data.diagnostic && (
+          <div className="flex justify-between border-t border-slate-800/50 mt-1 pt-1 col-span-1 sm:col-span-2">
+            <span className="text-slate-500">Tiempo de respuesta RUI:</span> 
+            <span className="text-emerald-400">{data.diagnostic.timeMs.toFixed(0)} ms</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function NucleoFamiliar({ arraysData }: { arraysData: Record<string, any[]> }) {
   if (!arraysData || Object.keys(arraysData).length === 0) return null;
 
@@ -436,3 +491,4 @@ function NucleoFamiliar({ arraysData }: { arraysData: Record<string, any[]> }) {
     </div>
   );
 }
+

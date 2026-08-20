@@ -127,7 +127,10 @@ export async function POST(req: Request) {
       await new Promise(resolve => setTimeout(resolve, 800)); // Simulate delay
       
       if (numeroDocumento === '00000') {
-        return NextResponse.json({ success: false, message: 'No se encontró información para los datos ingresados.' }, { status: 404 });
+        return NextResponse.json({ 
+          success: false, 
+          error: { code: 'RUI_NOT_FOUND', message: 'No se encontró información para los datos ingresados.' } 
+        }, { status: 404 });
       }
 
       // Estructura realista con objetos anidados y un array de integrantes (núcleo familiar)
@@ -142,18 +145,17 @@ export async function POST(req: Request) {
           departamento: "BOGOTÁ D.C.",
           municipio: "BOGOTÁ D.C."
         },
-        integrantes_hogar: [
-          { documento: "***1234", parentesco: "JEFE DE HOGAR", edad: 45, estado: "VALIDADO" },
-          { documento: "***5678", parentesco: "HIJO(A)", edad: 15, estado: "VALIDADO" }
+        integrantes: [
+          { documento: "***1234", nombres: "JUAN", parentesco: "JEFE DE HOGAR", edad: 45, estado: "VALIDADO" },
+          { documento: "***5678", nombres: "MARIA", parentesco: "HIJO(A)", edad: 15, estado: "VALIDADO" }
         ],
-        _aviso: "DATOS DE PRUEBA - MOCK MODE"
+        _aviso: "MODO DEMOSTRACIÓN - DATOS DE PRUEBA"
       };
 
       const timeMs = performance.now() - startTime;
       const inspection = inspectRuiResponse(mockResponse);
 
       if (isDebug) {
-        // En modo debug, mostramos SÓLO LA ESTRUCTURA para no exponer datos reales/PII
         console.log('[RUI_DEBUG] Estructura devuelta (Mock):', JSON.stringify(inspection.schema, null, 2));
       }
 
@@ -176,17 +178,46 @@ export async function POST(req: Request) {
     const startTime = performance.now();
     let status = 0;
     let responseText = '';
+    let cookieHeader = '';
+    let csrfToken = '';
 
     try {
+      // 2.a FETCH SESSION & CSRF TOKEN
+      const sessionResponse = await fetch(baseUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        },
+        signal: controller.signal
+      });
+      
+      const sessionCookies = sessionResponse.headers.getSetCookie ? sessionResponse.headers.getSetCookie() : [];
+      cookieHeader = sessionCookies.map(c => c.split(';')[0]).join('; ');
+      
+      const htmlText = await sessionResponse.text();
+      // Regex para encontrar el token CSRF clásico de ASP.NET
+      const csrfMatch = htmlText.match(/name="__RequestVerificationToken" type="hidden" value="([^"]+)"/i);
+      if (csrfMatch) {
+        csrfToken = csrfMatch[1];
+      }
+
+      // 2.b PERFORM ACTUAL POST QUERY
+      const params = new URLSearchParams();
+      params.append('pTipDoc', tipoDocumento);
+      params.append('pNumDoc', numeroDocumento);
+      if (csrfToken) {
+        params.append('__RequestVerificationToken', csrfToken);
+      }
+
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
+          'Cookie': cookieHeader,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'X-Requested-With': 'XMLHttpRequest'
         },
-        body: new URLSearchParams({
-          pTipDoc: tipoDocumento,
-          pNumDoc: numeroDocumento
-        }),
+        body: params.toString(),
         signal: controller.signal
       });
 
@@ -195,14 +226,38 @@ export async function POST(req: Request) {
       responseText = await response.text();
 
       if (!response.ok) {
-        throw new Error(`Error HTTP: ${status}`);
+        // Manejar códigos HTTP específicos de error con respuestas seguras
+        let errMessage = 'No fue posible conectar con el servicio RUI';
+        let errCode = 'RUI_CONNECTION_ERROR';
+        
+        if (status === 403 || status === 401) {
+          errMessage = 'El servicio rechazó temporalmente la solicitud.';
+          errCode = 'RUI_FORBIDDEN';
+        } else if (status === 429) {
+          errMessage = 'Se alcanzó temporalmente el límite de consultas. Espera unos minutos.';
+          errCode = 'RUI_RATE_LIMIT';
+        } else if (status >= 500) {
+          errMessage = 'El servicio externo no está disponible temporalmente.';
+          errCode = 'RUI_SERVER_ERROR';
+        }
+
+        return NextResponse.json({ 
+          success: false, 
+          error: { code: errCode, message: errMessage, details: `HTTP ${status}` }
+        }, { status });
       }
     } catch (fetchError: any) {
       clearTimeout(timeoutId);
       if (fetchError.name === 'AbortError') {
-        return NextResponse.json({ success: false, message: 'El servicio tardó demasiado en responder.' }, { status: 504 });
+        return NextResponse.json({ 
+          success: false, 
+          error: { code: 'RUI_TIMEOUT', message: 'El servicio está tardando demasiado en responder. Intenta nuevamente.', details: 'Timeout' }
+        }, { status: 504 });
       }
-      throw fetchError;
+      return NextResponse.json({ 
+        success: false, 
+        error: { code: 'RUI_CONNECTION_ERROR', message: 'No fue posible conectar con el servicio RUI', details: fetchError.message || 'Unknown network error' }
+      }, { status: 502 });
     }
 
     const timeMs = performance.now() - startTime;
@@ -214,15 +269,16 @@ export async function POST(req: Request) {
       parsedData = JSON.parse(responseText);
       responseType = 'JSON';
     } catch (e) {
-      // Manejar como texto si el endpoint falla pero devuelve un 200 con HTML (ej: WAF/Proxy error)
+      // Manejar como texto si el endpoint no devuelve JSON
       parsedData = { _rawText: responseText.substring(0, 500) }; 
     }
 
     const inspection = inspectRuiResponse(parsedData);
     
     if (isDebug) {
-      // NUNCA IMPRIMIR parsedData COMPLETO para proteger PII, sólo se imprime inspection.schema
       console.log('[RUI_DEBUG] Estructura real inspeccionada:', JSON.stringify(inspection.schema, null, 2));
+      console.log('[RUI_DEBUG] Cookies obtenidas:', cookieHeader ? 'Sí' : 'No');
+      console.log('[RUI_DEBUG] CSRF encontrado:', csrfToken ? 'Sí' : 'No');
     }
 
     const normalized = normalizeRuiResponse(parsedData, inspection, {
@@ -237,6 +293,9 @@ export async function POST(req: Request) {
 
   } catch (error) {
     console.error('[RUI_API_ERROR]', error instanceof Error ? error.message : 'Unknown error');
-    return NextResponse.json({ success: false, message: 'No fue posible realizar la consulta. Intenta nuevamente.' }, { status: 500 });
+    return NextResponse.json({ 
+      success: false, 
+      error: { code: 'RUI_INTERNAL_ERROR', message: 'No fue posible realizar la consulta. Intenta nuevamente.' }
+    }, { status: 500 });
   }
 }
