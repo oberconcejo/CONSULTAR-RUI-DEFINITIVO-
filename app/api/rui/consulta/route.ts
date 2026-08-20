@@ -125,57 +125,8 @@ export async function POST(req: Request) {
     const baseUrl = process.env.RUI_BASE_URL || 'https://ventanillasocial.dnp.gov.co';
     const endpoint = `${baseUrl}/Home/ObtenerDatosRUI`;
 
-    // Helper: Generar Respuesta Mock / Fallback
-    function getFallbackResponse() {
-      const startTimeMock = performance.now();
-      if (numeroDocumento === '00000') {
-        return NextResponse.json({ 
-          success: false, 
-          error: { code: 'RUI_NOT_FOUND', message: 'No se encontró información para los datos ingresados.' } 
-        }, { status: 404 });
-      }
-
-      // Estructura realista con objetos anidados y un array de integrantes (núcleo familiar)
-      const mockResponse = {
-        estado_registro: "VIGENTE",
-        clasificacion: {
-          grupo: "A",
-          subgrupo: "A1"
-        },
-        fecha_actualizacion: "2023-10-15",
-        ubicacion: {
-          departamento: "BOGOTÁ D.C.",
-          municipio: "BOGOTÁ D.C."
-        },
-        integrantes: [
-          { documento: "***1234", nombres: "JUAN", parentesco: "JEFE DE HOGAR", edad: 45, estado: "VALIDADO" },
-          { documento: "***5678", nombres: "MARIA", parentesco: "HIJO(A)", edad: 15, estado: "VALIDADO" }
-        ],
-        _aviso: "MODO DEMOSTRACIÓN - FALLBACK ACTIVADO POR BLOQUEO DE RED"
-      };
-
-      const timeMs = performance.now() - startTimeMock;
-      const inspection = inspectRuiResponse(mockResponse);
-
-      const normalized = normalizeRuiResponse(mockResponse, inspection, {
-        endpoint: '/Home/ObtenerDatosRUI (FALLBACK)',
-        method: 'POST',
-        status: 200,
-        timeMs,
-        responseType: 'JSON'
-      });
-
-      return NextResponse.json({ success: true, data: normalized });
-    }
-
-    // 1. MOCK MODE
-    if (isMock) {
-      await new Promise(resolve => setTimeout(resolve, 800)); // Simulate delay
-      return getFallbackResponse();
-    }
-
     // 2. REAL SERVICE INTEGRATION
-    const totalTimeout = parseInt(process.env.RUI_TIMEOUT || '20000', 10);
+    const totalTimeout = parseInt(process.env.RUI_TIMEOUT || '15000', 10);
     const startTime = performance.now();
 
     let status = 0;
@@ -244,20 +195,42 @@ export async function POST(req: Request) {
         let errMessage = 'No fue posible conectar con el servicio RUI';
         let errCode = 'RUI_CONNECTION_ERROR';
         
-        if (status === 403 || status === 401 || status === 429 || status >= 500) {
-          return getFallbackResponse();
+        if (status === 403 || status === 401) {
+          errCode = 'RUI_UNAUTHORIZED';
+          errMessage = 'Credenciales del servicio no autorizadas o bloqueadas por WAF';
+        } else if (status === 429) {
+          errCode = 'RUI_RATE_LIMIT';
+          errMessage = 'El servicio RUI ha recibido demasiadas solicitudes (Límite de peticiones)';
+        } else if (status >= 500) {
+          errCode = 'RUI_UNAVAILABLE';
+          errMessage = 'El servicio RUI no está disponible';
+        } else if (status === 404) {
+          errCode = 'RUI_NOT_FOUND';
+          errMessage = 'Endpoint del servicio RUI no encontrado';
         }
 
+        console.error(`[RUI_ERROR] HTTP ${status}: ${responseText.substring(0, 100)}`);
         return NextResponse.json({ 
           success: false, 
-          error: { code: errCode, message: errMessage, details: `HTTP ${status} - ${responseText.substring(0, 100)}` }
+          error: { code: errCode, message: errMessage }
         }, { status: status >= 500 ? 502 : status }); // Si es 5xx, devolvemos 502 Bad Gateway
       }
     } catch (fetchError: any) {
-      // Auto-Fallback: Si el firewall de DNP bloquea a Vercel (TimeOut / Drop), 
-      // regresamos automáticamente los datos del motor local para evitar que la UI se rompa
-      // y garantizar la demostración de la aplicación sin errores.
-      return getFallbackResponse();
+      const isTimeout = fetchError.name === 'AbortError';
+      const exactError = fetchError.cause?.message || fetchError.message || 'Unknown network error';
+      console.error('[RUI_NETWORK_ERROR]', exactError);
+
+      if (isTimeout) {
+        return NextResponse.json({ 
+          success: false, 
+          error: { code: 'RUI_TIMEOUT', message: 'Tiempo de espera agotado' }
+        }, { status: 504 });
+      }
+
+      return NextResponse.json({ 
+        success: false, 
+        error: { code: 'RUI_CONNECTION_ERROR', message: 'Error de conexión con el servicio', details: exactError }
+      }, { status: 502 });
     }
 
     const timeMs = performance.now() - startTime;
