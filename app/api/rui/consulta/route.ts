@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
+export const maxDuration = 60; // Maximize serverless function execution time (up to 60s on Pro, 10s on Hobby)
+export const dynamic = 'force-dynamic'; // Prevent any caching of this route
+
 const schema = z.object({
   tipoDocumento: z.string().min(1, 'Selecciona el tipo de documento'),
   numeroDocumento: z.string().min(5, 'El número de documento debe tener al menos 5 caracteres').regex(/^[0-9]+$/, 'Solo se permiten números'),
@@ -171,11 +174,9 @@ export async function POST(req: Request) {
     }
 
     // 2. REAL SERVICE INTEGRATION
-    const timeout = parseInt(process.env.RUI_TIMEOUT || '15000', 10);
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
-
+    const totalTimeout = parseInt(process.env.RUI_TIMEOUT || '20000', 10);
     const startTime = performance.now();
+
     let status = 0;
     let responseText = '';
     let cookieHeader = '';
@@ -186,12 +187,16 @@ export async function POST(req: Request) {
 
     const commonHeaders = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      'Accept-Language': 'es-CO,es-419;q=0.9,es;q=0.8,en;q=0.7'
+      'Accept-Language': 'es-CO,es-419;q=0.9,es;q=0.8,en;q=0.7',
+      'Connection': 'keep-alive'
     };
 
     try {
+      // 2.a FAST FETCH SESSION & CSRF TOKEN (Aislado con timeout corto)
+      const sessionController = new AbortController();
+      const sessionTimeoutId = setTimeout(() => sessionController.abort(), 3500); // 3.5s max for GET
+
       try {
-        // 2.a FETCH SESSION & CSRF TOKEN (Aislado en su propio try-catch)
         const sessionResponse = await fetch(baseUrl, {
           method: 'GET',
           headers: {
@@ -199,9 +204,11 @@ export async function POST(req: Request) {
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'Upgrade-Insecure-Requests': '1'
           },
-          signal: controller.signal
+          signal: sessionController.signal,
+          keepalive: true
         });
         
+        clearTimeout(sessionTimeoutId);
         const sessionCookies = sessionResponse.headers.getSetCookie ? sessionResponse.headers.getSetCookie() : [];
         cookieHeader = sessionCookies.map(c => c.split(';')[0]).join('; ');
         
@@ -211,10 +218,17 @@ export async function POST(req: Request) {
           csrfToken = csrfMatch[1];
         }
       } catch (sessionError: any) {
-        console.warn('[RUI_WARN] No se pudo obtener sesión inicial. Continuando con POST directo.', sessionError.message);
+        clearTimeout(sessionTimeoutId);
+        console.warn('[RUI_WARN] Fast session fetch failed or timed out. Continuing to POST.', sessionError.message);
       }
 
       // 2.b PERFORM ACTUAL POST QUERY
+      const elapsed = performance.now() - startTime;
+      const remainingTime = Math.max(totalTimeout - elapsed, 5000); // At least 5s for the POST
+
+      const postController = new AbortController();
+      const postTimeoutId = setTimeout(() => postController.abort(), remainingTime);
+
       const params = new URLSearchParams();
       params.append('pTipDoc', tipoDocumento);
       params.append('pNumDoc', numeroDocumento);
@@ -234,10 +248,11 @@ export async function POST(req: Request) {
           ...(cookieHeader ? { 'Cookie': cookieHeader } : {})
         },
         body: params.toString(),
-        signal: controller.signal
+        signal: postController.signal,
+        keepalive: true
       });
 
-      clearTimeout(timeoutId);
+      clearTimeout(postTimeoutId);
       status = response.status;
       responseText = await response.text();
 
@@ -263,7 +278,6 @@ export async function POST(req: Request) {
         }, { status: status >= 500 ? 502 : status }); // Si es 5xx, devolvemos 502 Bad Gateway
       }
     } catch (fetchError: any) {
-      clearTimeout(timeoutId);
       const isTimeout = fetchError.name === 'AbortError';
       const exactError = fetchError.cause?.message || fetchError.message || 'Unknown network error';
       
