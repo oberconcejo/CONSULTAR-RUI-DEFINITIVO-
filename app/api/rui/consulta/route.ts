@@ -181,71 +181,44 @@ export async function POST(req: Request) {
     let status = 0;
     let responseText = '';
     let cookieHeader = '';
-    let csrfToken = '';
 
     // Bypass SSL issues comunes en sitios gubernamentales
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     
-    // Configurar Resolución DNS manual hacia Google (8.8.8.8, 8.8.4.4)
-    let customBaseUrl = baseUrl;
-    let customEndpoint = endpoint;
-    const urlObj = new URL(baseUrl);
-    const hostHeader = urlObj.hostname;
-
     try {
-      const resolver = new Resolver();
-      resolver.setServers(['8.8.8.8', '8.8.4.4']);
-      const addresses = await resolver.resolve4(urlObj.hostname);
-      if (addresses && addresses.length > 0) {
-        const targetIp = addresses[0];
-        console.log(`[RUI_DNS] Resolviendo ${urlObj.hostname} a IP: ${targetIp} usando Google DNS`);
-        
-        customBaseUrl = baseUrl.replace(urlObj.hostname, targetIp);
-        customEndpoint = endpoint.replace(urlObj.hostname, targetIp);
-      }
-    } catch (dnsError) {
-      console.warn('[RUI_DNS_WARN] Falló la resolución con Google DNS. Se usará el DNS por defecto.', dnsError);
-    }
-
-    const commonHeaders = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      'Accept-Language': 'es-CO,es-419;q=0.9,es;q=0.8,en;q=0.7',
-      'Connection': 'keep-alive',
-      'Host': hostHeader
-    };
-
-    try {
-      // 2.a FAST FETCH SESSION & CSRF TOKEN (Aislado con timeout corto)
+      // 2.a FAST FETCH SESSION COOKIES (Aislado con timeout corto)
       const sessionController = new AbortController();
       const sessionTimeoutId = setTimeout(() => sessionController.abort(), 3500); // 3.5s max for GET
 
       try {
-        const sessionResponse = await fetch(customBaseUrl, {
+        const sessionResponse = await fetch(baseUrl, {
           method: 'GET',
           headers: {
-            ...commonHeaders,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Upgrade-Insecure-Requests': '1'
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'accept-language': 'es-CO,es-ES;q=0.9,es;q=0.8,en;q=0.7,en-GB;q=0.6,en-US;q=0.5,es-MX;q=0.4',
+            'priority': 'u=0, i',
+            'sec-ch-ua': '"Not=A?Brand";v="99", "Microsoft Edge";v="151", "Chromium";v="151"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'none',
+            'sec-fetch-user': '?1',
+            'upgrade-insecure-requests': '1',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0'
           },
-          signal: sessionController.signal,
-          keepalive: true
+          signal: sessionController.signal
         });
         
         clearTimeout(sessionTimeoutId);
         const sessionCookies = sessionResponse.headers.getSetCookie ? sessionResponse.headers.getSetCookie() : [];
         cookieHeader = sessionCookies.map(c => c.split(';')[0]).join('; ');
-        
-        const htmlText = await sessionResponse.text();
-        const csrfMatch = htmlText.match(/name="__RequestVerificationToken" type="hidden" value="([^"]+)"/i);
-        if (csrfMatch) {
-          csrfToken = csrfMatch[1];
-        }
       } catch (sessionError: any) {
         clearTimeout(sessionTimeoutId);
         console.warn('[RUI_WARN] Fast session fetch failed or timed out. Continuing to POST.', sessionError.message);
       }
 
-      // 2.b PERFORM ACTUAL POST QUERY
+      // 2.b PERFORM ACTUAL POST QUERY EXACTLY AS CURL
       const elapsed = performance.now() - startTime;
       const remainingTime = Math.max(totalTimeout - elapsed, 5000); // At least 5s for the POST
 
@@ -253,22 +226,26 @@ export async function POST(req: Request) {
       const postTimeoutId = setTimeout(() => postController.abort(), remainingTime);
 
       const params = new URLSearchParams();
-      params.append('pTipDoc', tipoDocumento);
       params.append('pNumDoc', numeroDocumento);
-      if (csrfToken) {
-        params.append('__RequestVerificationToken', csrfToken);
-      }
+      params.append('pTipDoc', tipoDocumento);
 
-      const response = await fetch(customEndpoint, {
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
-          ...commonHeaders,
-          'Accept': 'application/json, text/javascript, */*; q=0.01',
-          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          'X-Requested-With': 'XMLHttpRequest',
-          'Origin': baseUrl,
-          'Referer': `${baseUrl}/`,
-          ...(cookieHeader ? { 'Cookie': cookieHeader } : {})
+          'accept': '*/*',
+          'accept-language': 'es-CO,es-ES;q=0.9,es;q=0.8,en;q=0.7,en-GB;q=0.6,en-US;q=0.5,es-MX;q=0.4',
+          'content-type': 'application/x-www-form-urlencoded',
+          'origin': 'https://ventanillasocial.dnp.gov.co',
+          'priority': 'u=1, i',
+          'referer': 'https://ventanillasocial.dnp.gov.co/',
+          'sec-ch-ua': '"Not=A?Brand";v="99", "Microsoft Edge";v="151", "Chromium";v="151"',
+          'sec-ch-ua-mobile': '?0',
+          'sec-ch-ua-platform': '"Windows"',
+          'sec-fetch-dest': 'empty',
+          'sec-fetch-mode': 'cors',
+          'sec-fetch-site': 'same-origin',
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 Edg/151.0.0.0',
+          ...(cookieHeader ? { 'cookie': cookieHeader } : {})
         },
         body: params.toString(),
         signal: postController.signal,
@@ -336,7 +313,6 @@ export async function POST(req: Request) {
     if (isDebug) {
       console.log('[RUI_DEBUG] Estructura real inspeccionada:', JSON.stringify(inspection.schema, null, 2));
       console.log('[RUI_DEBUG] Cookies obtenidas:', cookieHeader ? 'Sí' : 'No');
-      console.log('[RUI_DEBUG] CSRF encontrado:', csrfToken ? 'Sí' : 'No');
     }
 
     const normalized = normalizeRuiResponse(parsedData, inspection, {
